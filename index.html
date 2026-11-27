@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Letter Pop</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Letter Pop">
+<meta name="theme-color" content="#fdf6ec">
+<style>
+  html, body { margin:0; height:100%; overflow:hidden; user-select:none; -webkit-user-select:none;
+               -webkit-touch-callout:none; touch-action:none; overscroll-behavior:none; -webkit-tap-highlight-color:transparent; }
+  #paused small, #end small { display:inline-block; padding:14px 24px; border-radius:999px; border:1px dashed rgba(122,106,138,.4); }
+  body { background: linear-gradient(160deg,#fdf6ec 0%,#e8f3f1 100%); font-family: "Nunito","Avenir Next","Trebuchet MS",sans-serif; }
+  canvas { position:fixed; left:0; top:0; width:100%; height:100%; }
+  #start { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column;
+           background:rgba(253,246,236,.94); z-index:5; color:#7a6a8a; text-align:center; }
+  #start .big { font-size:min(18vw,160px); letter-spacing:.05em; }
+  #start p { font-size:20px; opacity:.8; }
+  .langs { display:flex; gap:16px; margin-top:8px; }
+  .langs button { font:inherit; font-size:24px; padding:14px 28px; border:none; border-radius:999px;
+                  background:#fff; color:#7a6a8a; box-shadow:0 4px 14px rgba(120,100,140,.18); cursor:pointer; }
+  .langs button:hover { background:#f3e9ff; }
+  /* timer: small and faint in the corner, bigger and clearer in the last minute */
+  #timer { position:fixed; top:10px; right:12px; z-index:6; padding:3px 10px; border-radius:999px;
+           background:rgba(255,255,255,.5); color:#a58bb8; font-size:14px; font-weight:800; opacity:.45;
+           transform-origin:top right; transition:all .6s ease; }
+  #timer.warn { opacity:.8; color:#d99a4e; }
+  #timer.last { font-size:38px; padding:8px 22px; opacity:1; color:#e0745a; background:rgba(255,255,255,.9);
+                box-shadow:0 4px 16px rgba(120,100,140,.2); animation:breathe 2s ease-in-out infinite; }
+  @keyframes breathe { 0%,100% { transform:scale(1) } 50% { transform:scale(1.06) } }
+  #paused { position:fixed; inset:0; z-index:5; display:none; align-items:center; justify-content:center; flex-direction:column;
+            background:rgba(253,246,236,.8); color:#7a6a8a; text-align:center; }
+  #paused .big { font-size:min(14vw,120px); }
+  #paused small { opacity:.6; margin-top:14px; font-size:16px; }
+  #end { position:fixed; inset:0; z-index:4; display:none; align-items:center; justify-content:center; flex-direction:column;
+         background:linear-gradient(160deg,#fdf6ec,#e6dcff); color:#7a6a8a; text-align:center; animation:fadein 2s ease; }
+  #end .big { font-size:min(16vw,140px); }
+  #end .msg { font-size:min(6vw,44px); font-weight:800; margin:10px 20px; }
+  #end small { opacity:.6; margin-top:30px; }
+  @keyframes fadein { from { opacity:0 } to { opacity:1 } }
+  #fs { position:fixed; right:10px; bottom:calc(10px + env(safe-area-inset-bottom)); z-index:4; opacity:.25; font-size:14px; color:#7a6a8a; cursor:pointer; }
+  #fs span { padding:8px 4px; }
+  #fs:hover { opacity:.8; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="start"><div class="big">A B 1 2</div>
+  <p>Grown-up: pick a language to start</p>
+  <div class="langs">
+    <button data-lang="en-US">English</button>
+    <button data-lang="ro-RO">Română</button>
+    <button data-lang="fr-FR">Français</button>
+    <button data-lang="sv-SE">Svenska</button>
+  </div>
+  <p id="vstatus" style="font-size:15px;max-width:520px;line-height:1.4"></p>
+</div>
+<div id="paused"><div class="big">⏸</div><small id="resumehold">Grown-up: Ctrl+P, or press and hold here to resume</small></div>
+<div id="timer"></div>
+<div id="end"><div class="big">🌙⭐</div><div class="msg" id="endmsg"></div><small id="endhold">Grown-up: Ctrl+H, or press and hold here for the home screen</small></div>
+<div id="fs"><span id="pausebtn">hold: pause (Ctrl+P)</span> &nbsp;·&nbsp; <span id="home">hold: home (Ctrl+H)</span> &nbsp;·&nbsp; <span id="fsb">hold: fullscreen</span></div>
+
+<script>
+// ---------- Settings (tweak freely) ----------
+const params = new URLSearchParams(location.search);
+const SETTINGS = {
+  speed: 28,               // px/second – slow & calm
+  size: 0.2,               // bubble diameter as fraction of the smaller screen side
+  speak: params.get("speak") !== "0",
+  lang: params.get("lang") || "en-US",
+  nameChance: 0.6,        // chance of showing a family/friend name when one starts with the letter
+};
+const ORDER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".split("");
+let successes = 0;
+// Session timer: play stops after SESSION_MIN minutes, with a gentle signal WARN_MIN minutes before.
+// (add ?minutes=1 to the URL to test quickly)
+const SESSION_MS = (+params.get("minutes") || 15) * 60000;
+const WARN_MS = Math.min(2*60000, SESSION_MS/2);
+let paused = false;
+let elapsed = 0, tickLast = 0, warned = false, ended = false, shownSecs = -1;   // elapsed only counts while playing
+const GOODBYE = {
+  "en-US":"All done for today! See you next time", "fr-FR":"C'est fini pour aujourd'hui ! À bientôt",
+  "ro-RO":"Gata pentru azi! Pe curând", "sv-SE":"Nu är det slut för idag! Vi ses snart",
+};
+// number of bubbles on screen: starts at 2, +1 every 5 successes, max 6
+const maxOnScreen = () => Math.min(6, 2 + Math.floor(successes/5));
+
+// ---------- Family & friends (edit freely): [name, emoji] ----------
+const NAMES = [
+  // grandparents
+  ["Babar","👴"],["Mamifa","👵"],["Bunica","👵"],
+  // parents / adults
+  ["Papa","👨"],["Maman","👩"],["Quentin","👨"],["Catalina","👩"],["Roxana","👩"],["Dan","👨"],["George","👨"],
+  ["Diana","👩"],["Radu","👨"],["Qhuyn","👩"],["Riley","👨"],["Livia","👩"],["Rita","👩"],["Michael","👨"],
+  ["Darsha","👩"],["Dana","👩"],["Vlad","👨"],["Andrea","👩"],["Fabian","👨"],["Bleuzenn","👩"],["Matthias","👨"],
+  ["Erwan","👨"],["Pauline","👩"],["Gagou","👩"],["Mariso","👩"],["Guillaume","👨"],["Doudou","👩"],["Servane","👩"],["Benoit","👨"],
+  ["Louis","👨"],["Charlotte","👩"],["Alice","👩"],["Dominique","🧑"],["Marie-Amelie","👩"],
+  // cousins, kids, friends
+  ["Henri","👦"],["Armand","👦"],["Axel","👦"],["Teodor","👦"],["Adele","👧"],["Arthur","👦"],["Aidan","👦"],
+  ["Alma","👧"],["Isaac","👦"],["Pia","👧"],["Remi","👦"],["Athanase","👦"],["Theodora","👧"],["Victoria","👧"],
+  ["Loui","👦"],["Liam","👦"],["Leo","👦"],
+  ["Abel","👦"],["Zita","👧"],["Leon","👦"],["Colette","👧"],
+  ["Alienor","👧"],["Gauvin","👦"],["Ariane","👧"],
+];
+const initial = s => s.normalize("NFD").replace(/[̀-ͯ]/g,"")[0].toUpperCase();
+let NAMES_BY_LETTER = {};
+const NAME_WEIGHT = { Aidan: 6 };   // names that should come up more often (default 1)
+// names that change with the language (so Maman → Mama / Mamma / Mommy, and they move to the matching letter)
+const LOCAL_NAMES = {
+  Maman: {"ro-RO":"Mama", "sv-SE":"Mamma", "en-US":"Mommy"},
+  Papa:  {"ro-RO":"Tata", "sv-SE":"Pappa", "en-US":"Daddy"},
+};
+function buildNames(lang){
+  NAMES_BY_LETTER = {};
+  NAMES.forEach(([name, emoji]) => {
+    const shown = (LOCAL_NAMES[name] && LOCAL_NAMES[name][lang]) || name;
+    const list = (NAMES_BY_LETTER[initial(shown)] ||= []);
+    for(let i=0; i<(NAME_WEIGHT[name]||1); i++) list.push([shown, emoji]);
+  });
+}
+buildNames(SETTINGS.lang);
+
+// ---------- Words per language: "word emoji;word emoji;..." ----------
+const WORDS = {
+  "en-US": {
+    A:"apple 🍎;airplane ✈️;ant 🐜;alligator 🐊;astronaut 🧑‍🚀",
+    B:"banana 🍌;ball ⚽;bear 🐻;bee 🐝;boat ⛵;butterfly 🦋;baby 👶",
+    C:"cat 🐱;car 🚗;cow 🐄;cake 🎂;cookie 🍪;carrot 🥕",
+    D:"dog 🐶;duck 🦆;dinosaur 🦕;dolphin 🐬;drum 🥁;donut 🍩",
+    E:"elephant 🐘;egg 🥚;eye 👀;ear 👂",
+    F:"fish 🐟;frog 🐸;flower 🌸;fire 🔥;fox 🦊;fairy 🧚",
+    G:"giraffe 🦒;guitar 🎸;grapes 🍇;gift 🎁;ghost 👻",
+    H:"horse 🐴;house 🏠;heart ❤️;hat 🎩;hippo 🦛;hedgehog 🦔",
+    I:"insect 🐛;ice 🧊;island 🏝️",
+    J:"juice 🧃;jeans 👖;jacket 🧥",
+    K:"kite 🪁;koala 🐨;kangaroo 🦘;key 🔑;kiwi 🥝",
+    L:"lion 🦁;lemon 🍋;lamp 💡;leaf 🍃;ladybug 🐞",
+    M:"moon 🌙;monkey 🐒;mouse 🐭;milk 🥛;music 🎵;mountain ⛰️",
+    N:"nose 👃;nest 🪺;nut 🥜",
+    O:"orange 🍊;owl 🦉;octopus 🐙;onion 🧅",
+    P:"pig 🐷;pizza 🍕;penguin 🐧;pear 🍐;piano 🎹;parrot 🦜",
+    Q:"queen 👸;question ❓",
+    R:"rabbit 🐰;rainbow 🌈;robot 🤖;rocket 🚀;rose 🌹;rain 🌧️",
+    S:"sun ☀️;star ⭐;snake 🐍;snow ❄️;shoe 👟;strawberry 🍓;snowman ⛄",
+    T:"tiger 🐯;train 🚂;tractor 🚜;turtle 🐢;tree 🌳;tomato 🍅",
+    U:"umbrella ☂️;unicorn 🦄",
+    V:"violin 🎻;volcano 🌋;van 🚐",
+    W:"whale 🐳;water 💧;watermelon 🍉;wow 🤩",
+    X:"xylophone 🎶",
+    Y:"yo-yo 🪀;yogurt 🥛;yellow 💛",
+    Z:"zebra 🦓;zoo 🐘;zero 0️⃣",
+    nums:["zero","one","two","three","four","five","six","seven","eight","nine"] },
+  "fr-FR": {
+    A:"ananas 🍍;avion ✈️;abeille 🐝;arbre 🌳;araignée 🕷️",
+    B:"banane 🍌;ballon 🎈;bateau ⛵;bébé 👶;bonbon 🍬",
+    C:"chat 🐱;chien 🐶;cœur ❤️;camion 🚚;cerise 🍒;canard 🦆",
+    D:"dauphin 🐬;dragon 🐉;dinosaure 🦕;dodo 😴",
+    E:"éléphant 🐘;étoile ⭐;escargot 🐌;eau 💧",
+    F:"fraise 🍓;fleur 🌸;fromage 🧀;fusée 🚀;fée 🧚;feu 🔥",
+    G:"gâteau 🎂;girafe 🦒;guitare 🎸;glace 🍦;grenouille 🐸",
+    H:"hibou 🦉;hérisson 🦔;hélicoptère 🚁;hippopotame 🦛;hamburger 🍔",
+    I:"île 🏝️;insecte 🐛;image 🖼️",
+    J:"jus 🧃;jouet 🧸;jardin 🌷;jaune 💛",
+    K:"koala 🐨;kiwi 🥝;kangourou 🦘;karaté 🥋",
+    L:"lapin 🐰;lune 🌙;lion 🦁;livre 📖;lit 🛏️;lait 🥛",
+    M:"maison 🏠;mouton 🐑;main ✋;musique 🎵;moto 🏍️;montagne ⛰️;miel 🍯",
+    N:"nuage ☁️;nez 👃;nid 🪺;neige ❄️;nounours 🧸",
+    O:"oiseau 🐦;orange 🍊;ours 🐻;oeuf 🥚;oreille 👂;ordinateur 💻",
+    P:"poisson 🐟;pomme 🍎;papillon 🦋;poule 🐔;pizza 🍕;pingouin 🐧;piano 🎹",
+    Q:"quille 🎳;quatre 4️⃣",
+    R:"robot 🤖;rose 🌹;renard 🦊;raisin 🍇;requin 🦈",
+    S:"soleil ☀️;singe 🐒;serpent 🐍;souris 🐭;sapin 🎄;savon 🧼",
+    T:"tortue 🐢;tigre 🐯;train 🚂;tracteur 🚜;tomate 🍅;téléphone 📱",
+    U:"usine 🏭;unicorne 🦄;un 1️⃣",
+    V:"voiture 🚗;vache 🐄;vélo 🚲;violon 🎻;volcan 🌋",
+    W:"wagon 🚃;waouh 🤩",
+    X:"xylophone 🎶",
+    Y:"yaourt 🥛;yoyo 🪀;yeux 👀",
+    Z:"zèbre 🦓;zéro 0️⃣;zoo 🐘",
+    nums:["zéro","un","deux","trois","quatre","cinq","six","sept","huit","neuf"] },
+  "sv-SE": {
+    A:"apa 🐒;ananas 🍍;apelsin 🍊;ambulans 🚑",
+    B:"bil 🚗;boll ⚽;banan 🍌;buss 🚌;bok 📖;björn 🐻",
+    C:"citron 🍋;cykel 🚲;cirkus 🎪",
+    D:"dinosaurie 🦕;drake 🐉;dörr 🚪",
+    E:"elefant 🐘;ekorre 🐿️",
+    F:"fisk 🐟;fjäril 🦋;flygplan ✈️;fågel 🐦;fot 🦶;fyrverkeri 🎆",
+    G:"giraff 🦒;gitarr 🎸;groda 🐸;glass 🍦;gris 🐷;gurka 🥒",
+    H:"hund 🐶;hus 🏠;häst 🐴;hjärta ❤️;hatt 🎩;hand ✋",
+    I:"is 🧊;igelkott 🦔",
+    J:"jordgubbe 🍓;jul 🎄;jordglob 🌍;jacka 🧥",
+    K:"katt 🐱;kanin 🐰;ko 🐄;krona 👑;kaka 🍪;klocka ⏰;kamel 🐫",
+    L:"lejon 🦁;lampa 💡;lastbil 🚚;leksak 🧸;lök 🧅;ljus 🕯️",
+    M:"måne 🌙;mus 🐭;moln ☁️;mjölk 🥛;mat 🍽️;mössa 🧢",
+    N:"nalle 🧸;näsa 👃;nyckel 🔑;nudlar 🍜",
+    O:"orm 🐍;ost 🧀;okej 👌",
+    P:"pingvin 🐧;paraply ☂️;pizza 🍕;päron 🍐;pannkaka 🥞;potatis 🥔;papegoja 🦜",
+    R:"räv 🦊;raket 🚀;ros 🌹;regn 🌧️;regnbåge 🌈;robot 🤖",
+    S:"sol ☀️;stjärna ⭐;skor 👟;snö ❄️;sked 🥄;sköldpadda 🐢;snögubbe ⛄",
+    T:"tåg 🚂;tiger 🐯;tomat 🍅;tårta 🎂;traktor 🚜;tand 🦷;tvål 🧼",
+    U:"uggla 🦉;ur 🕰️",
+    V:"val 🐳;vatten 💧;vante 🧤;vulkan 🌋;väska 👜",
+    W:"wok 🍳;wow 🤩",
+    X:"xylofon 🎶",
+    Y:"yxa 🪓;yoghurt 🥛;yoga 🧘",
+    Z:"zebra 🦓;zoo 🐘",
+    nums:["noll","ett","två","tre","fyra","fem","sex","sju","åtta","nio"] },
+  "ro-RO": {
+    A:"albină 🐝;avion ✈️;arici 🦔;apă 💧;ananas 🍍;autobuz 🚌",
+    B:"banană 🍌;balon 🎈;bicicletă 🚲;broască 🐸;bomboană 🍬;barcă ⛵;bebe 👶",
+    C:"cățel 🐶;carte 📖;cal 🐴;căpșună 🍓;ceas ⏰;casă 🏠;ciocolată 🍫;cireașă 🍒",
+    D:"delfin 🐬;dinozaur 🦕;dragon 🐉;dinte 🦷",
+    E:"elefant 🐘;elicopter 🚁",
+    F:"fluture 🦋;floare 🌸;foc 🔥;fotbal ⚽;fantomă 👻;fată 👧",
+    G:"găină 🐔;girafă 🦒;gogoașă 🍩;ghitară 🎸;gheață 🧊",
+    H:"hipopotam 🦛;hamburger 🍔;hartă 🗺️",
+    I:"iepuraș 🐰;inimă ❤️;iarbă 🌱;înghețată 🍦;insectă 🐛",
+    J:"jucărie 🧸;joc 🎲;jeans 👖",
+    K:"koala 🐨;kiwi 🥝;karate 🥋;kangur 🦘",
+    L:"leu 🦁;lună 🌙;lapte 🥛;lămâie 🍋;lup 🐺;lumânare 🕯️;lalea 🌷;lampă 💡",
+    M:"mașină 🚗;măr 🍎;maimuță 🐒;mână ✋;muzică 🎵;munte ⛰️;miere 🍯",
+    N:"nor ☁️;nas 👃;nucă 🌰;ninsoare ❄️;navă 🚀",
+    O:"oaie 🐑;ou 🥚;ochi 👀;ochelari 👓;orez 🍚",
+    P:"pisică 🐱;pui 🐥;pizza 🍕;pere 🍐;păsăre 🐦;pește 🐟;pian 🎹;pinguin 🐧",
+    R:"rață 🦆;roșie 🍅;rachetă 🚀;roată 🛞;robot 🤖;rochie 👗",
+    S:"soare ☀️;stea ⭐;șarpe 🐍;șoarece 🐭;salată 🥗;supă 🍲;săpun 🧼",
+    T:"tren 🚂;tigru 🐯;tractor 🚜;tort 🎂;telefon 📱;toamnă 🍂;trandafir 🌹;tobă 🥁",
+    U:"urs 🐻;umbrelă ☂️;unicorn 🦄;ușă 🚪",
+    V:"vacă 🐄;vulpe 🦊;vapor 🚢;vânt 💨;vulcan 🌋;vioară 🎻",
+    W:"wafă 🧇;wow 🤩",
+    X:"xilofon 🎶",
+    Y:"yoga 🧘;yoyo 🪀",
+    Z:"zebră 🦓;zmeu 🪁;zână 🧚;zero 0️⃣",
+    nums:["zero","unu","doi","trei","patru","cinci","șase","șapte","opt","nouă"] },
+};
+// "word emoji" or just "word" (no emoji → a happy one is shown). Use _ for a space inside a word.
+const parse = s => s ? s.split(";").map(x => {
+  const i = x.indexOf(" ");
+  return [(i<0 ? x : x.slice(0,i)).replace(/_/g," "), i<0 ? "" : x.slice(i+1)];
+}) : [];
+
+// More vocabulary (merged with WORDS above). Words don't need a matching emoji.
+const MORE_WORDS = {
+  "fr-FR": {
+    A:"ami 🤝;anniversaire 🎂;agneau 🐑;ambulance 🚑;aigle 🦅;assiette 🍽️;aspirateur;autobus 🚌;avocat 🥑;abricot 🍑;arc-en-ciel 🌈;automne 🍂;alphabet 🔤;arrosoir;armoire;aile",
+    B:"bain 🛁;biberon 🍼;bisou 😘;brosse;bus 🚌;bougie 🕯️;beurre 🧈;bonnet;botte 🥾;baleine 🐳;biscuit 🍪;bulle 🫧;balançoire;bleu 💙;blé 🌾;bras 💪;bouche 👄;boîte 📦;bureau;bibliothèque 📚",
+    C:"câlin 🤗;canapé 🛋️;cadeau 🎁;cloche 🔔;citron 🍋;carotte 🥕;champignon 🍄;chaussure 👟;chapeau 🎩;cheval 🐴;chèvre 🐐;crocodile 🐊;coccinelle 🐞;clé 🔑;crayon ✏️;cuillère 🥄;chaise;couverture;cirque 🎪;crabe 🦀;cochon 🐷;couleur 🎨;ciel ☁️;cuisine;cube;cercle ⭕",
+    D:"dent 🦷;doudou 🧸;doigt;dessin 🎨;drapeau 🏁;danse 💃;diamant 💎;douche 🚿;dimanche;dinde 🦃;dos;docteur 🧑‍⚕️;dame;domino",
+    E:"école 🏫;écureuil 🐿️;escalier;éclair;enfant 🧒;équipe;été ☀️;échelle;espace 🚀;écharpe 🧣;éponge 🧽;écran 🖥️;étage;épaule;empreinte 👣",
+    F:"forêt 🌲;fourchette 🍴;fenêtre;famille 👪;farine;feuille 🍃;fantôme 👻;flamant 🦩;foulard;foot ⚽;fête 🎉;frère;frites 🍟;fourmi 🐜;flocon ❄️;four;fruit 🍎;framboise;frigo",
+    G:"gant 🧤;genou;gorille 🦍;gomme;goutte 💧;gilet;gaufre 🧇;guépard 🐆;garage;guirlande;grue 🏗️;gourde;gourmand 😋;grotte",
+    H:"herbe 🌱;hiver ⛄;horloge 🕰️;hôpital 🏥;huile;hamster 🐹;harpe;haricot;hôtel 🏨;heure ⏰;hippocampe;hirondelle 🐦;histoire 📖;hache",
+    I:"iguane 🦎;instrument 🎷;idée 💡;invitation 💌;iris 🌷;igname;itinéraire",
+    J:"jambe 🦵;jeu 🎲;jupe;journal 📰;jumeaux;jardinier;jonquille;juillet;jument;joie 😄;jeudi;jongleur 🤹;jumelles;jaguar 🐆",
+    K:"kayak 🛶;kilo;ketchup;kimono 👘;kébab;kermesse;kilomètre;kiosque;karaoké 🎤",
+    L:"lampe 💡;lac 🏞️;lézard 🦎;loup 🐺;lunettes 👓;lumière;légume 🥦;lundi;luge;limonade;libellule;léopard 🐆;linge;lèvres 👄;langue 👅;lanterne 🏮;lama 🦙;labyrinthe",
+    M:"mer 🌊;manteau 🧥;méduse;melon 🍈;mouche 🪰;moineau;mouchoir;miroir;marteau 🔨;marionnette;marché;mardi;mercredi;mangue 🥭;montre ⌚;mitaine;moulin;menu;magie ✨;masque;mouette;moustache;musée 🏛️",
+    N:"noël 🎄;nuit 🌙;noir;nombre 🔢;nageoire;nappe;noisette 🌰;navire 🚢;nénuphar 🪷;ninja;nuque;nom;neuf 9️⃣;nager 🏊;nourriture 🍽️",
+    O:"orage ⛈️;ogre;olive 🫒;ongle 💅;orteil;ombre;opéra;oncle 👨;onde;océan 🌊;orchestre 🎻;oie;otarie;outil 🔧;ouragan 🌀;œil 👁️;oignon 🧅;os 🦴",
+    P:"pain 🍞;pied 🦶;pluie 🌧️;plage 🏖️;pelle;peinture 🎨;poupée;pyjama;panda 🐼;perroquet 🦜;porte 🚪;poire 🍐;prince 🤴;princesse 👸;pirate 🏴‍☠️;puzzle 🧩;parapluie ☂️;panier 🧺;piscine 🏊;pompier 🚒;police 🚓;patate 🥔;pâtes 🍝;peigne;pull;pantalon 👖;pêche 🍑;prune;papier 📄;paquet 📦;parc 🌳;perle;peluche 🧸",
+    Q:"quai;quenelle;question ❓;quinze;queue;quiche 🥧;quadrille;quartier",
+    R:"roue 🛞;rouge ❤️;riz 🍚;rire 😂;rêve 💭;ruban 🎀;radio 📻;rhinocéros 🦏;rat 🐀;robe 👗;roi 🤴;reine 👸;rivière 🏞️;route 🛣️;rocher 🪨;récréation;rideau;raquette 🎾;renne;radis;ruche;règle 📏",
+    S:"sac 🎒;sable 🏖️;sirène 🧜;serviette;sieste 😴;sourire 😊;sucre;salade 🥗;soupe 🍲;sandwich 🥪;saucisse 🌭;scie 🪚;ski ⛷️;squelette 💀;sorcière 🧙;sorbet;stylo 🖊️;samedi;sirop;seau;saxophone 🎷;salon;sel 🧂;sœur 👧;soir 🌆",
+    T:"table;tasse ☕;tambour 🥁;tapis;taureau 🐂;tente ⛺;thé 🍵;tête;toit;tonnerre ⚡;trampoline;trèfle 🍀;tulipe 🌷;tunnel;tuyau;tablier;tarte 🥧;toboggan;trésor 💰;trompette 🎺;taxi 🚕;tricycle;tennis 🎾;théâtre 🎭;timbre;tricot 🧶;trottinette 🛴",
+    U:"uniforme;univers 🌌;ukulélé 🎸;urgence 🚨;ustensile;uranus 🪐",
+    V:"vent 💨;vague 🌊;valise 🧳;ver 🪱;vase;vert 💚;violet 💜;village 🏘️;vitamine;ville 🏙️;vacances 🏖️;vendredi;veste;verre 🥛;vis;volant;voyage ✈️;vaisseau 🚀;vitrine;viande 🥩",
+    W:"wifi 📶;week-end 🎉;western 🤠;wallaby;watt ⚡;web 🌐;wapiti",
+    X:"taxi 🚕;six 6️⃣;deux 2️⃣;boxe 🥊;lynx 🐱;mixeur;texte 📝;exemple;extra;maxi",   // words that contain an X
+    Y:"yacht ⛵;yéti ❄️;yoga 🧘;yourte ⛺;yen 💴;yack",
+    Z:"zigzag;zone;zéphyr 🌬️;zut;zinc;zodiaque ♈;zeste 🍋;zèle;zinnia 🌸;zombi 🧟",
+  },
+  "sv-SE": {
+    A:"arm 💪;ansikte 🙂;aprikos 🍑;avokado 🥑;anka 🦆;alfabet 🔤;akvarium 🐠;advent 🕯️;ask;affär;apotek",
+    B:"badkar 🛁;bebis 👶;bi 🐝;blomma 🌸;blå 💙;bord;borste;bro 🌉;brev ✉️;bröd 🍞;bälte;byxor 👖;ballong 🎈;berg ⛰️;bubbla 🫧;bråk;bild 🖼️;bad 🛁;bäver 🦫;bär;bokstav 🔤",
+    C:"choklad 🍫;clown 🤡;chips;cykelhjälm;cd 💿;camping ⛺;cello 🎻;cape;cirkel ⭕;chef;check",
+    D:"dag ☀️;docka;dator 💻;dröm 💭;dusch 🚿;dans 💃;daggmask 🪱;diamant 💎;duva 🕊️;dagis;dimma 🌫️;disk;dopp;dräkt;dunjacka",
+    E:"enhörning 🦄;eld 🔥;ekollon 🌰;elbil 🚗;etta 1️⃣;energi ⚡;en 1️⃣;eka;exempel;efterrätt 🍨",
+    F:"fest 🎉;fönster;frukt 🍎;fika ☕;fingrar;fluga 🪰;flaska 🍼;fyr 🗼;fyra 4️⃣;familj 👪;farfar 👴;farmor 👵;fladdermus 🦇;flodhäst 🦛;flicka 👧;frukost 🥣;fjäder 🪶;fjäll ⛰️;frost ❄️;fyrkant ⬜;fotboll ⚽;fem 5️⃣",
+    G:"gubbe 👴;gunga;gran 🎄;gul 💛;grön 💚;gäst;gata;gnu;gorilla 🦍;godis 🍬;golv;gräs 🌱;glasögon 👓;gåva 🎁;guld 🥇;gaffel 🍴;gryta 🍲;gås;grej",
+    H:"hav 🌊;hjul 🛞;hår;himmel 🌤️;hink;hiss;honung 🍯;humla 🐝;haj 🦈;hamster 🐹;hjälm;hjort 🦌;hammare 🔨;handduk;halsband;hemma 🏠;hallon;hoppa;hylla;hälsning 👋;handske 🧤",
+    I:"idé 💡;isbjörn 🐻‍❄️;insekt 🐛;inne;isglass 🍦;instrument 🎷;igloo;inbjudan 💌;idrott ⚽;ishockey 🏒;iris",
+    J:"jord 🌍;jakt;jägare;juice 🧃;jaguar 🐆;jeans 👖;jobb;juli;juni;jordnöt 🥜;jazz 🎷;jippie 🎉;jätte",
+    K:"kalas 🎉;kyckling 🐥;kjol 👗;kudde;kopp ☕;kniv;kula;kyrka ⛪;kyss 😘;kram 🤗;korv 🌭;kalv 🐮;krokodil 🐊;kaktus 🌵;kastanj 🌰;kaffe ☕;karta 🗺️;kök;krabba 🦀;kanot 🛶;kamera 📷",
+    L:"lekplats 🛝;lila 💜;lamm 🐑;lås 🔒;lunch 🍽️;leende 😊;löv 🍃;lärare;lera;lugn 😌;luft 💨;leopard 🐆;lövträd 🌳;lax 🐟",
+    M:"morgon 🌅;mun 👄;mjuk;mage;mask 🪱;mango 🥭;matta;myra 🐜;mygga 🦟;mynt 🪙;middag 🍽️;melon 🍈;morot 🥕;motorcykel 🏍️;museum 🏛️;moster 👩;morbror 👨;mormor 👵;morfar 👴;magi ✨",
+    N:"natt 🌙;nattlinne;nöt 🥜;nål 🪡;nos;nummer 🔢;nyheter 📰;näbb;nagel 💅;nio 9️⃣;noll 0️⃣;nyckelpiga 🐞;namn;nästa;nöjd 😊;nudel;näktergal",
+    O:"oxe 🐂;orkester 🎻;oas 🏝️;ord 💬;omelett 🍳;oväder ⛈️;olja;ostron;oro;ordning;orangutang 🦧",
+    P:"pil 🏹;penna ✏️;papper 📄;pyssel ✂️;paket 📦;park 🌳;present 🎁;prick;prinsessa 👸;prins 🤴;pirat 🏴‍☠️;plåster 🩹;plommon;pumpa 🎃;panda 🐼;påsk 🐣;pinne;pool 🏊;polis 🚓;pussel 🧩;puss 😘;påse;pasta 🍝;paprika 🫑;pelare",
+    Q:"quiz ❓;quokka 🦘",
+    R:"rygg;ring 💍;rutschkana;röd ❤️;rosa 🩷;rymd 🌌;ris 🍚;rådjur 🦌;rum;råtta 🐀;rolig 😄;ren 🦌;rosett 🎀;radio 📻;resa 🧳;rök;ritning 🎨;rosor 🌹",
+    S:"sjö 🏞️;skog 🌲;sova 😴;säng 🛏️;stol;strand 🏖️;sand;spindel 🕷️;skratt 😂;sång 🎤;socker;sockor 🧦;sax ✂️;sommar ☀️;smör 🧈;snigel 🐌;säl 🦭;skepp 🚢;slott 🏰;spade;spegel;svan 🦢;syster 👧;sjöstjärna ⭐;saft 🧃;svamp 🍄;stad 🏙️;sko 👟;spöke 👻;skola 🏫",
+    T:"tallrik 🍽️;tupp 🐓;tält ⛺;tröja;tvätt;tumme 👍;tunnel;tomte 🎅;tulpan 🌷;trumma 🥁;trollkarl 🧙;tyst 🤫;träd 🌳;tur 🍀;trampolin;tre 3️⃣;tio 🔟;tårar 😢;telefon 📱;tv 📺;tidning 📰",
+    U:"ull 🧶;utter 🦦;ugn;ukulele 🎸;utflykt 🧺;universum 🌌;ungar 🐣;upp ⬆️;under;uppe",
+    V:"vinter ❄️;vår 🌷;vagn;vän 🤝;vind 💨;varg 🐺;vattenmelon 🍉;våg;vagga;vit 🤍;vinge;väder ⛅;verktyg 🔧;väg 🛣️;vovve 🐶;vinka 👋;vitlök;ved 🪵;vecka",
+    W:"wc 🚽;wifi 📶;webb 🌐;wellpapp 📦;wafer",
+    X:"taxi 🚕;sex 6️⃣;lax 🐟;fax 📠;box 📦;yxa 🪓;kex 🍪;oxe 🐂;text 📝;växt 🌱;extra",   // words that contain an X
+    Y:"ylle 🧶;ytterkläder 🧥;yacht ⛵;yoyo 🪀;yta;yngre;yrke",
+    Z:"zick-zack;zon;zoom 🔍;zucchini 🥒;zorro",
+  },
+  "ro-RO": {
+    A:"alb 🤍;ac 🪡;ajutor 🆘;aur 🥇;avocado 🥑;arbore 🌳;ață 🧵;aripi;autostradă 🛣️;ambulanță 🚑;alfabet 🔤;ardei 🫑;animal 🐾;aer 💨;agrafă;ascensor;apus 🌅;aprilie;acvariu 🐠;albastru 💙",
+    B:"bunic 👴;bunică 👵;baie 🛁;băiat 👦;bluză;bocanci 🥾;bufniță 🦉;brad 🎄;brânză 🧀;bumbac;buton;buze 👄;borcan;bărbat 👨;băț;blând 😊;bilă;bucurie 😄;bun 👍;bec 💡;bancă;biscuit 🍪;burete 🧽;brățară;buchet 💐",
+    C:"cană ☕;cartof 🥔;castravete 🥒;ceapă 🧅;cămașă 👕;ciupercă 🍄;cuțit;cub;cerc ⭕;creion ✏️;crocodil 🐊;cangur 🦘;câine 🐶;cuc;coș 🧺;cort ⛺;copil 🧒;copac 🌳;cadou 🎁;clopot 🔔;cheie 🔑;castel 🏰;căciulă;ciorapi 🧦;cântec 🎵;ceață 🌫️;cer ☁️;cămilă 🐫;ciocan 🔨;circ 🎪;clovn 🤡;covor;curcubeu 🌈;curcan 🦃;calculator 💻;cărămidă 🧱",
+    D:"dulce 🍬;degete;duș 🚿;dans 💃;drum 🛣️;duminică;deal;diamant 💎;desen 🎨;doctor 🧑‍⚕️;dulap;dovleac 🎃;dimineață 🌅;dop;drapel 🏁;daruri 🎁",
+    E:"eșarfă 🧣;erou 🦸;ecran 🖥️;excursie 🧺;eclipsă 🌑;echipă;emoji 😀;enigmă ❓;excavator 🚜;ecou 🔊;energie ⚡",
+    F:"fructe 🍎;frate;fereastră;farfurie 🍽️;furculiță 🍴;fundă 🎀;fum;fotografie 📷;frigider;fulger ⚡;foaie 📄;fragă 🍓;frunză 🍃;fustă 👗;fericire 😄;foame;fetiță 👧;fântână ⛲;foarfece ✂️;fân;fasole;flamingo 🦩;frig 🥶;fiu;fermă 🚜;familie 👪",
+    G:"gândac 🪲;gară 🚉;gură 👄;gât;grădină 🌷;ghete;glob 🌍;gorilă 🦍;gustare;gem;gălbenuș;grâu 🌾;grădiniță 🏫;ghem 🧶;geantă 👜;galben 💛;gimnastică;găleată;greier 🦗;gogoși 🍩;gheară",
+    H:"hamster 🐹;hotel 🏨;haină 🧥;hârtie 📄;harpă;hrană 🍽️;haios 😄;hol;hering 🐟;hobby 🎨;halat;hublou",
+    I:"iaurt 🥛;iarnă ❄️;ied 🐐;iubire 💕;idee 💡;insulă 🏝️;înot 🏊;înger 👼;imagine 🖼️;invitație 💌;inel 💍;iglu;iepure 🐇;iguană 🦎;iubit ❤️;icoană;ie 👚",
+    J:"jos ⬇️;joi;jur;junglă 🌴;jgheab;jder;jambon 🍖;jocuri 🎲;joacă 🎠;jeleu;jachetă 🧥;judecător;jumătate;joben 🎩;jar 🔥;jupon",
+    K:"kilogram;ketchup;kebab;karaoke 🎤;kimono 👘;kayak 🛶;kit;kilometru;kiosk",
+    L:"lac 🏞️;lemn 🪵;lenjerie;limbă 👅;lumină 💡;limonadă 🍋;lingură 🥄;linie;leagăn;ladă;liliac 🦇;libelulă;lipici;luni;lume 🌍;lanternă 🔦;lift;lebădă 🦢;linguriță;lopată",
+    M:"mare 🌊;masă;măgar 🫏;melc 🐌;mărgele;mâncare 🍽️;mănușă 🧤;morcov 🥕;muscă 🪰;mușețel 🌼;mașinuță 🚗;măsline 🫒;moș 🎅;mămăruță 🐞;marți;minge ⚽;mic;moară;motocicletă 🏍️;muzeu 🏛️;mango 🥭;melon 🍈;magazin 🏪;mesaj 💬;mămăligă",
+    N:"noapte 🌙;nou;nume;nuntă 💒;nisip 🏖️;nasture;nuc 🌰;nufăr 🪷;nap;norocos 🍀;nepot;ninja;nori ☁️;nord;notă 🎵;noroc 🍀;nuiele;nerv",
+    O:"oră ⏰;oglindă;om 🧑;oraș 🏙️;orchestră 🎻;ocean 🌊;oală 🍲;obraz;ofițer;ouă 🥚;oase 🦴;oțet;orhidee 🌺;ornament;oblon;operă;omidă 🐛",
+    P:"pâine 🍞;pat 🛏️;papuci;pădure 🌲;prăjitură 🍰;pătură;păpușă;prieten 🤝;poartă;praf;piatră 🪨;palton;pantaloni 👖;pălărie 👒;plajă 🏖️;ploaie 🌧️;perie;pisoi 🐱;picior 🦶;poză 📷;pământ 🌍;popcorn 🍿;puzzle 🧩;panda 🐼;papagal 🦜;porc 🐷;porumbel 🕊️;peșteră;parc 🌳;poștaș;pompier 🚒;poliție 🚓;prinț 🤴;prințesă 👸;pirat 🏴‍☠️;prune;piersică 🍑",
+    Q:"quiz ❓;quokka 🦘",
+    R:"râu 🏞️;ramă;raft;râs 😂;roz 🩷;roșu ❤️;rinocer 🦏;ridiche;ruj;rucsac 🎒;răsărit 🌅;rădăcină;radio 📻;rege 🤴;regină 👸;rac 🦀;rimă;rândunică 🐦;rățușcă 🐥;reptilă 🐍;restaurant 🍽️",
+    S:"sare 🧂;scaun;scară;sticlă 🍼;sac;sanie 🛷;somn 😴;strugure 🍇;stradă 🛣️;sandviș 🥪;sirenă 🧜;sertar;spital 🏥;spirală 🌀;stejar 🌳;sunet 🔊;șapcă 🧢;șosete 🧦;șurub;ștrand 🏊;șemineu;șorț;șoim;șobolan 🐀;șampon 🧴;șah ♟️;sâmbătă",
+    T:"tablou 🖼️;tigaie 🍳;tavă;tunet ⚡;termometru 🌡️;trotinetă 🛴;tricou 👕;tobogan;tramvai 🚋;turn 🗼;trompetă 🎺;tabără ⛺;teatru 🎭;tenis 🎾;tei;timbru;telecomandă;ton 🐟;tablă;taxi 🚕;tastatură ⌨️;trifoi 🍀;triunghi 🔺;tun",
+    U:"unchi 👨;umăr;ulcior;unghie 💅;ulei;umbră;urmă 👣;usturoi;uriaș;unelte 🔧;univers 🌌;ursuleț 🧸;ureche 👂;undă 🌊;uzină 🏭",
+    V:"vară ☀️;vază;viață;veveriță 🐿️;viespe;vis 💭;vultur 🦅;vin;vizită;vitrină;vopsea 🎨;verde 💚;violet 💜;vineri;vacanță 🏖️;veselie 😄;vaccin 💉;veste;vagon 🚃;valiză 🧳;văr;viteză 💨;vierme 🪱;vinete 🍆;volan",
+    W:"weekend 🎉;web 🌐;wifi 📶;wc 🚽;western 🤠;wapiti",
+    X:"xerox 📠;taxi 🚕;box 🥊;saxofon 🎷;text 📝;expres 🚄;exemplu;extra;relax 😌;fax 📠;mixer",   // words that contain an X
+    Y:"yacht ⛵;yoghurt 🥛;yeti ❄️",
+    Z:"zi ☀️;zahăr;zăpadă ❄️;zid 🧱;zâmbet 😊;zgomot 🔊;zmeură;zbor ✈️;zar 🎲;zarzavat 🥦;zimbru 🦬",
+  },
+  "en-US": {
+    A:"ambulance 🚑;arm 💪;acorn 🌰;angel 👼;avocado 🥑;anchor ⚓;alphabet 🔤;apron;autumn 🍂;ape 🦍;arrow 🏹;artist 🧑‍🎨;adventure;ankle;apricot 🍑;aquarium 🐠",
+    B:"bed 🛏️;bath 🛁;book 📖;bird 🐦;bus 🚌;bread 🍞;butter 🧈;bubble 🫧;bicycle 🚲;blanket;brush;bell 🔔;bone 🦴;boots 🥾;bridge 🌉;button;basket 🧺;beach 🏖️;blue 💙;brother;bunny 🐰;bug 🐛;block;bowl",
+    C:"clock ⏰;cloud ☁️;cup ☕;castle 🏰;crown 👑;crayon 🖍️;candle 🕯️;cheese 🧀;cherry 🍒;chair;cap 🧢;camel 🐫;camera 📷;circus 🎪;clown 🤡;coat 🧥;comb;corn 🌽;crab 🦀;chicken 🐔;cousin;candy 🍬;cuddle 🤗;cave;coconut 🥥",
+    D:"door 🚪;doll;dress 👗;dance 💃;drawing 🎨;diamond 💎;desk;daisy 🌼;deer 🦌;dentist;dream 💭;drink 🥤;dust;diaper;dish 🍽️;doctor 🧑‍⚕️",
+    E:"earth 🌍;eagle 🦅;easel;elbow;engine 🚂;envelope ✉️;evening 🌆;eraser;eel;elf 🧝;exit;eleven;eight 8️⃣;energy ⚡;echo",
+    F:"feather 🪶;finger;flag 🏁;foot 🦶;forest 🌲;fork 🍴;friend 🤝;fruit 🍎;family 👪;farm 🚜;fan;fence;firefighter 🧑‍🚒;firetruck 🚒;five 5️⃣;four 4️⃣;floor;flute;flashlight 🔦;fries 🍟;fun 🎉;frost ❄️;fog 🌫️",
+    G:"garden 🌷;glasses 👓;glove 🧤;goat 🐐;goldfish 🐠;grass 🌱;green 💚;grandma 👵;grandpa 👴;gorilla 🦍;game 🎮;gate;goose;gum;giant;gold 🥇;globe 🌍",
+    H:"hammer 🔨;hug 🤗;honey 🍯;hill;helmet;hair;happy 😊;hospital 🏥;hotdog 🌭;hose;hen 🐔;hive;harp;hockey 🏒;holiday 🏖️;hello 👋;hurry;hand ✋;hay",
+    I:"igloo;iguana 🦎;ink;iron;idea 💡;invitation 💌;inch;itch;ice_cream 🍦;instrument 🎷;ivy 🌿",
+    J:"jar;jam;jelly;jump;jungle 🌴;jet ✈️;jeep 🚙;joke 😂;journey;jewel 💎;jog 🏃;judge;July;June;jigsaw 🧩",
+    K:"king 🤴;kitten 🐱;kitchen;kick;kiss 😘;knee;knife;knight;knot;kayak 🛶;ketchup;kettle;keyboard ⌨️;kid 🧒",
+    L:"leg 🦵;lips 👄;lunch 🍽️;log 🪵;lake 🏞️;ladder;lamb 🐑;lizard 🦎;letter ✉️;library 📚;lock 🔒;lollipop 🍭;love ❤️;light 💡;laugh 😂;lobster 🦞;llama 🦙;lightning ⚡;lime",
+    M:"mitten;mirror;market;magic ✨;map 🗺️;mango 🥭;marble;mask;mat;melon 🍈;mushroom 🍄;muffin 🧁;motorcycle 🏍️;mud;mouth 👄;museum 🏛️;mailbox 📬;mop;mermaid 🧜;morning 🌅",
+    N:"neck;needle 🪡;net;newspaper 📰;night 🌙;noodle 🍜;noon;number 🔢;nurse 🧑‍⚕️;nine 9️⃣;necklace 📿;nap 😴;napkin;nail 💅;name;north",
+    O:"ocean 🌊;otter 🦦;ostrich;oven;oval;olive 🫒;orchestra 🎻;one 1️⃣;oats;omelet 🍳;ox 🐂;oar;outside",
+    P:"pencil ✏️;paint 🎨;pillow;puddle;puppy 🐶;pumpkin 🎃;puzzle 🧩;pirate 🏴‍☠️;prince 🤴;princess 👸;popcorn 🍿;pocket;plate 🍽️;plant 🪴;peach 🍑;peanut 🥜;party 🎉;paper 📄;park 🌳;parade;pants 👖;panda 🐼;pajamas;pie 🥧;pool 🏊;present 🎁;police 🚓;plane ✈️",
+    Q:"quack 🦆;quarter;quilt;quiet 🤫;quick ⚡;quiz ❓",
+    R:"ring 💍;river 🏞️;road 🛣️;roof;room;rope;rice 🍚;radio 📻;red ❤️;rake;rhino 🦏;rooster 🐓;raccoon 🦝;raisin;rattle;ribbon 🎀;rug;raincoat;race 🏁;rock 🪨",
+    S:"sand 🏖️;sea 🌊;ship 🚢;sock 🧦;spoon 🥄;soap 🧼;sleep 😴;smile 😊;snail 🐌;spider 🕷️;squirrel 🐿️;swan 🦢;swing;sky;slide;sheep 🐑;seal 🦭;shark 🦈;scarf 🧣;shirt 👕;soup 🍲;school 🏫;sandwich 🥪;sister 👧;stone;summer ☀️;sugar;salt 🧂;scissors ✂️;sailboat ⛵",
+    T:"table;teddy 🧸;towel;toothbrush 🪥;toy;teeth 🦷;tent ⛺;tea 🍵;truck 🚚;tunnel;treasure 💰;trumpet 🎺;trampoline;turkey 🦃;tulip 🌷;tummy;throat;thumb 👍;ticket 🎟️;tooth 🦷;tower 🗼;taxi 🚕;tie;tape;toast 🍞",
+    U:"uncle 👨;up ⬆️;uniform;universe 🌌;ukulele 🎸;underwear;under;utensil;ufo 🛸",
+    V:"vase;vegetable 🥦;valley;vest;village 🏘️;vet;vanilla;vine;voice 🎤;vacation 🏖️;vacuum;vitamin;violet 💜",
+    X:"box 📦;fox 🦊;six 6️⃣;taxi 🚕;axe 🪓;excited 🤩;mix;wax;next;saxophone 🎷;relax 😌",   // words that contain an X
+    W:"window;wind 💨;wing;wolf 🐺;worm 🪱;watch ⌚;wave 🌊;web 🕸️;wheel 🛞;whistle;wall;walnut;winter ❄️;witch 🧙;wizard 🧙;wool 🧶;wrist;wish 🌠;waffle 🧇;walrus;wet 💦",
+    Y:"yarn 🧶;yawn 🥱;year;yell;yolk;yes 👍;yacht ⛵;yak",
+    Z:"zipper;zigzag;zone;zucchini 🥒;zoom 🔍",
+  },
+};
+// all words for a letter in the chosen language (base list + extra vocabulary), without duplicates
+function wordsFor(lang, ch){
+  const seen = new Set();
+  return parse(WORDS[lang] && WORDS[lang][ch]).concat(parse(MORE_WORDS[lang] && MORE_WORDS[lang][ch]))
+    .filter(x => !seen.has(x[0]) && seen.add(x[0]));
+}
+
+const HAPPY = ["👏","⭐","🌟","🎉","🥳","💖","😊","🥰","🌈","🎈","🦋","🌻","🧸","☀️"];
+// Things to count: "emoji singular plural gender" (fr: m/f, sv: c=en / n=ett, ro: m/f/n)
+const OBJECTS = {
+  "en-US": "🐴 horse horses x;🐱 cat cats x;🍎 apple apples x;🎈 balloon balloons x;⭐ star stars x;🐥 chick chicks x;🍓 strawberry strawberries x;🦋 butterfly butterflies x;🚗 car cars x;🐻 bear bears x;🌸 flower flowers x;🐢 turtle turtles x;🐘 elephant elephants x;🐟 fish fish x;🏠 house houses x",
+  "fr-FR": "🐴 cheval chevaux m;🐱 chat chats m;🍎 pomme pommes f;🎈 ballon ballons m;⭐ étoile étoiles f;🐥 poussin poussins m;🍓 fraise fraises f;🦋 papillon papillons m;🚗 voiture voitures f;🐻 ours ours m;🌸 fleur fleurs f;🐢 tortue tortues f;🐘 éléphant éléphants m;🐟 poisson poissons m;🏠 maison maisons f",
+  "sv-SE": "🐴 häst hästar c;🐱 katt katter c;🍎 äpple äpplen n;🎈 ballong ballonger c;⭐ stjärna stjärnor c;🐥 kyckling kycklingar c;🍓 jordgubbe jordgubbar c;🦋 fjäril fjärilar c;🚗 bil bilar c;🐻 björn björnar c;🌸 blomma blommor c;🐢 sköldpadda sköldpaddor c;🐑 får får n;🏠 hus hus n",
+  "ro-RO": "🐴 cal cai m;🐱 pisică pisici f;🍎 măr mere n;🎈 balon baloane n;⭐ stea stele f;🐥 pui pui m;🍓 căpșună căpșune f;🦋 fluture fluturi m;🚗 mașină mașini f;🐻 urs urși m;🌸 floare flori f;🐸 broască broaște f;🐘 elefant elefanți m;🐑 oaie oi f;🏠 casă case f",
+};
+// number word that agrees in gender with the counted thing ("un cheval", "une pomme"; "en häst", "ett äpple"; "doi cai", "două pisici")
+function numWord(lang, n, g){
+  const base = WORDS[lang].nums[n];
+  if(n===1){
+    if(lang==="fr-FR") return g==="f" ? "une" : "un";
+    if(lang==="sv-SE") return g==="n" ? "ett" : "en";
+    if(lang==="ro-RO") return g==="f" ? "o" : "un";
+  }
+  if(n===2 && lang==="ro-RO") return g==="m" ? "doi" : "două";
+  return base;
+}
+const pick = a => a[Math.floor(Math.random()*a.length)];
+// Within one session ("partie") a word is never shown twice. Only Aidan may come back.
+// (Reset when a session ends and you go back home – see goHome().)
+const usedWords = new Set();
+const REPEAT_OK = new Set(["Aidan"]);
+let lastName = "";   // even Aidan doesn't appear twice in a row
+
+function reward(ch){
+  const L = WORDS[SETTINGS.lang];
+  if(/\d/.test(ch)){
+    if(!L) return { emoji: pick(HAPPY), word:"", say:[ch] };
+    const n = +ch;
+    const make = o => {
+      const [e, sing, plur, g] = o.split(" ");
+      const noun = (n===1 || (n===0 && SETTINGS.lang==="fr-FR")) ? sing : plur;   // French: "zéro cheval"
+      return { e, w: numWord(SETTINGS.lang, n, g) + " " + noun };
+    };
+    const options = OBJECTS[SETTINGS.lang].split(";").map(make);
+    const fresh = options.filter(o => !usedWords.has(o.w));
+    const c = pick(fresh.length ? fresh : options);   // (only repeats if all 15 combos of this number were used)
+    usedWords.add(c.w);
+    return { emoji: n===0 ? c.e+"🚫" : c.e.repeat(n), word:c.w, say:[c.w], digit:true };
+  }
+  const isFresh = x => REPEAT_OK.has(x[0]) ? x[0] !== lastName : !usedWords.has(x[0]);
+  const words = L ? wordsFor(SETTINGS.lang, ch).filter(isFresh) : [];
+  const names = (NAMES_BY_LETTER[ch] || []).filter(isFresh);
+  let entry;
+  if(names.length && (!words.length || Math.random() < SETTINGS.nameChance)) entry = pick(names);
+  else if(words.length) entry = pick(words);
+  // every word for this letter already used this session → just the letter and a happy emoji
+  if(!entry) return { emoji: pick(HAPPY), word:"", say:[ch.toLowerCase()] };
+  usedWords.add(entry[0]);
+  if(NAMES_BY_LETTER[ch] && NAMES_BY_LETTER[ch].some(n => n[0]===entry[0])) lastName = entry[0];
+  // position of the pressed letter inside the word (0 for words that start with it; later for e.g. "taxi" on X)
+  const plain = entry[0].normalize("NFD").replace(/[̀-ͯ]/g,"").toLowerCase();
+  const hl = Math.max(0, plain.indexOf(ch.toLowerCase()));
+  return { emoji: entry[1] || pick(HAPPY), word: entry[0], hl, say:[ch.toLowerCase(), entry[0]] };
+}
+
+// ---------- Canvas ----------
+const cv = document.getElementById("c"), ctx = cv.getContext("2d");
+let W, H, dpr;
+function resize(){ dpr = window.devicePixelRatio||1; W = innerWidth; H = innerHeight;
+  cv.width = W*dpr; cv.height = H*dpr; ctx.setTransform(dpr,0,0,dpr,0,0); }
+addEventListener("resize", resize); resize();
+
+const PALETTE = [
+  ["#ffd6e0","#ff9fb8"], ["#d6ecff","#8cc4f5"], ["#fff2c2","#f5cf62"],
+  ["#d9f5d9","#8fd49a"], ["#e6dcff","#b19cf0"], ["#ffe0cc","#f5a77a"],
+];
+let items = [], particles = [], lastChar = "", started = false;
+
+// ---------- Audio ----------
+let actx;
+function audio(){ if(!actx){ try{ actx = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){} } return actx; }
+function pop(){
+  const a = audio(); if(!a) return;
+  const t = a.currentTime, o = a.createOscillator(), g = a.createGain();
+  o.type = "sine";
+  o.frequency.setValueAtTime(520 + Math.random()*180, t);
+  o.frequency.exponentialRampToValueAtTime(220, t+0.18);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(0.18, t+0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, t+0.22);
+  o.connect(g).connect(a.destination); o.start(t); o.stop(t+0.25);
+}
+function chime(){   // soft two-note bell
+  const a = audio(); if(!a) return;
+  [660, 880].forEach((f,i)=>{
+    const t = a.currentTime + i*0.35, o = a.createOscillator(), g = a.createGain();
+    o.type = "sine"; o.frequency.value = f;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.15, t+0.03);
+    g.gain.exponentialRampToValueAtTime(0.0001, t+1.2);
+    o.connect(g).connect(a.destination); o.start(t); o.stop(t+1.3);
+  });
+}
+function endSession(){
+  ended = true; started = false; items = [];
+  document.getElementById("timer").style.display = "none";
+  const msg = GOODBYE[SETTINGS.lang] || GOODBYE["en-US"];
+  document.getElementById("endmsg").textContent = msg;
+  document.getElementById("end").style.display = "flex";
+  chime(); setTimeout(()=>speak([msg]), 1500);
+}
+function checkTimer(now){
+  const delta = now - tickLast; tickLast = now;
+  if(started && !paused) elapsed += Math.min(delta, 2000);   // pauses on the home screen; cap = a sleeping laptop doesn't eat the session
+  if(ended) return;
+  const remaining = SESSION_MS - elapsed;
+  if(started && remaining <= 0){ endSession(); return; }
+  if(started && remaining <= WARN_MS && !warned){ warned = true; chime(); }
+  const el = document.getElementById("timer");
+  const s = Math.max(0, Math.ceil(remaining/1000));
+  if(s !== shownSecs){ shownSecs = s;
+    el.textContent = "⏳ " + Math.floor(s/60) + ":" + String(s%60).padStart(2,"0"); }
+  const cls = remaining <= 60000 ? "last" : remaining <= WARN_MS ? "warn" : "";
+  if(el.className !== cls) el.className = cls;
+}
+// Browsers don't expose voice gender, so match known female voice names and avoid known male ones.
+const FEMALE = /samantha|victoria|karen|moira|tessa|allison|ava\b|serena|fiona|zira|jenny|amélie|amelie|audrey|aurélie|marie|julie|hortense|denise|eloise|brigitte|alva|klara|sofie|astrid|ioana|alexandra|emil?ia|female|femme|woman|kvinna|google (français|svenska|română)/i;
+const MALE = /alex\b|fred|tom\b|david|mark\b|aaron|thomas|daniel|henri|paul|claude|mathieu|antoine|jean|oskar|mattias|bengt|emil\b|male\b|homme|man\b|stefan|andrei/i;
+function pickVoice(lang){
+  const vs = (speechSynthesis.getVoices()||[]);
+  const base = lang.slice(0,2).toLowerCase();
+  const sameLang = vs.filter(v => v.lang.replace("_","-").toLowerCase().startsWith(base));
+  const exact = sameLang.filter(v => v.lang.replace("_","-").toLowerCase() === lang.toLowerCase());
+  const pools = [exact, sameLang];
+  for(const p of pools){ const f = p.find(v => FEMALE.test(v.name) && !MALE.test(v.name)); if(f) return f; }
+  for(const p of pools){ const nm = p.find(v => !MALE.test(v.name)); if(nm) return nm; }
+  return null;
+}
+// Tell the grown-up on the start screen which languages have no installed voice (they'd fall back to English).
+function voiceStatus(){
+  if(!window.speechSynthesis) return;
+  const names = {"en-US":"English","ro-RO":"Română","fr-FR":"Français","sv-SE":"Svenska"};
+  const missing = Object.keys(names).filter(l => !speechSynthesis.getVoices().some(v => v.lang.replace("_","-").toLowerCase().startsWith(l.slice(0,2))));
+  const el = document.getElementById("vstatus");
+  if(speechSynthesis.getVoices().length === 0) return;
+  el.textContent = missing.length
+    ? "No voice installed for: " + missing.map(l=>names[l]).join(", ") + ". Mac: System Settings → Accessibility → Spoken Content → System Voice → Manage Voices (Swedish: Alva, Romanian: Ioana), then reopen this page in Safari."
+    : "";
+}
+if(window.speechSynthesis){ speechSynthesis.addEventListener("voiceschanged", voiceStatus); voiceStatus(); }
+function speak(parts){
+  if(!SETTINGS.speak || !window.speechSynthesis) return;
+  try{
+    speechSynthesis.cancel();
+    // small delay after cancel() and a held reference to the utterances: both avoid
+    // browsers silently dropping the 2nd utterance (the word after the letter)
+    clearTimeout(speak.t);
+    speak.t = setTimeout(()=>{
+      const v = pickVoice(SETTINGS.lang);
+      speak.keep = parts.map(p => {
+        const u = new SpeechSynthesisUtterance(p);
+        if(v) u.voice = v;
+        u.lang = SETTINGS.lang; u.rate = 0.75; u.pitch = 1.25; u.volume = 0.9;
+        return u;
+      });
+      speak.keep.forEach(u => speechSynthesis.speak(u));
+    }, 80);
+  }catch(e){}
+}
+
+// ---------- Items ----------
+function spawn(){
+  const d = Math.min(W,H)*SETTINGS.size;
+  let pool = ORDER.filter(c => c!==lastChar && !items.some(i=>i.ch===c));
+  if(!pool.length) pool = ORDER;
+  const ch = pick(pool);
+  lastChar = ch;
+  const ang = Math.random()*Math.PI*2;
+  let x, y, tries=0;
+  do { x = d + Math.random()*(W-2*d); y = d + Math.random()*(H-2*d); tries++; }
+  while(tries<30 && items.some(i=>!i.dying && Math.hypot(i.x-x,i.y-y) < d*1.3));
+  items.push({
+    ch, x, y, r:d/2, vx:Math.cos(ang)*SETTINGS.speed, vy:Math.sin(ang)*SETTINGS.speed,
+    color: pick(PALETTE),
+    born: performance.now(), phase: Math.random()*6, wiggle:0, dying:false,
+  });
+}
+function fill(){ while(items.filter(i=>!i.dying).length < maxOnScreen()) spawn(); }
+
+function burst(it){
+  const [light, dark] = it.color;
+  const n = 18;
+  for(let i=0;i<n;i++){
+    const a = (i/n)*Math.PI*2 + Math.random()*.3, s = 60 + Math.random()*110;
+    particles.push({ x:it.x, y:it.y, vx:Math.cos(a)*s, vy:Math.sin(a)*s - 30,
+      life:1, size:6+Math.random()*10, color: i%2?light:dark,
+      shape: ["dot","star","heart"][i%3] });
+  }
+  particles.push({ ring:true, x:it.x, y:it.y, r:it.r, life:1, color:dark });
+}
+
+function press(key){
+  if(!started || paused) return;
+  const ch = key.toUpperCase();
+  const hit = items.find(i=>i.ch===ch && !i.dying);
+  if(hit){
+    hit.dying = true; hit.dieAt = performance.now();
+    const rw = reward(ch);
+    hit.emoji = rw.emoji; hit.word = rw.word; hit.digit = !!rw.digit; hit.hl = rw.hl || 0;
+    hit.vx = hit.vy = 0;
+    // glide to a spot where the emoji + word fit fully on screen
+    const r = hit.r;
+    const halfW = Math.max(hit.digit ? r*2.6 : r*1.1, rw.word.length*r*.16 + r*.3);
+    const clamp = (v,lo,hi) => hi<lo ? (lo+hi)/2 : Math.max(lo, Math.min(hi, v));
+    hit.tx = clamp(hit.x, halfW, W-halfW);
+    hit.ty = clamp(hit.y, r*1.2, H-r*1.5);
+    successes++;
+    burst(hit); pop(); speak(rw.say);
+    setTimeout(fill, 1200);
+    setTimeout(()=>{ items = items.filter(i=>i!==hit); }, 2800);
+  } else if(ORDER.includes(ch)){
+    items.forEach(i=>i.wiggle = 1);   // gentle "not that one"
+  }
+}
+
+function togglePause(){
+  if(!started) return;                     // nothing to pause on the home / end screens
+  paused = !paused;
+  document.getElementById("paused").style.display = paused ? "flex" : "none";
+  if(paused){ clearTimeout(speak.t); try{ speechSynthesis.cancel(); }catch(e){} }
+}
+function goHome(){
+  paused = false; document.getElementById("paused").style.display = "none";
+  started = false; items = []; particles = [];
+  // a finished session starts fresh; otherwise the timer just resumes where it left off
+  if(ended){ elapsed = 0; warned = false; ended = false; successes = 0; shownSecs = -1; usedWords.clear(); lastName = ""; }
+  clearTimeout(speak.t);
+  try{ speechSynthesis.cancel(); }catch(e){}
+  document.getElementById("start").style.display = "flex";
+  document.getElementById("end").style.display = "none";
+  document.getElementById("timer").style.display = "";
+}
+addEventListener("keydown", e=>{
+  e.preventDefault();               // block browser shortcuts / scrolling while he mashes keys
+  if(e.ctrlKey && e.key.toLowerCase()==="h"){ goHome(); return; }   // grown-up shortcut: Ctrl+H
+  if(e.ctrlKey && e.key.toLowerCase()==="p"){ if(!e.repeat) togglePause(); return; }   // grown-up shortcut: Ctrl+P
+  if(e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
+  if(e.key.length===1) press(e.key);
+}, true);
+
+// ---------- Drawing ----------
+function drawHeart(x,y,s){
+  ctx.beginPath(); ctx.moveTo(x,y+s*.35);
+  ctx.bezierCurveTo(x-s,y-s*.3, x-s*.5,y-s, x,y-s*.45);
+  ctx.bezierCurveTo(x+s*.5,y-s, x+s,y-s*.3, x,y+s*.35); ctx.fill();
+}
+function drawStar(x,y,s){
+  ctx.beginPath();
+  for(let i=0;i<10;i++){ const r = i%2? s*.45 : s, a = -Math.PI/2 + i*Math.PI/5;
+    ctx.lineTo(x+Math.cos(a)*r, y+Math.sin(a)*r); }
+  ctx.closePath(); ctx.fill();
+}
+
+let last = performance.now();
+function frame(now){
+  const dt = paused ? 0 : Math.min(.05,(now-last)/1000); last = now;
+  checkTimer(now);
+  ctx.clearRect(0,0,W,H);
+
+  for(const it of items){
+    if(it.dying){
+      const k = Math.min(1, dt*6);
+      it.x += (it.tx-it.x)*k; it.y += (it.ty-it.y)*k;
+    } else {
+      it.x += it.vx*dt; it.y += it.vy*dt;
+      const m = it.r + 8;   // margin covers the gentle bobbing
+      if(it.x<m){ it.x=m; it.vx=Math.abs(it.vx); }
+      if(it.x>W-m){ it.x=W-m; it.vx=-Math.abs(it.vx); }
+      if(it.y<m){ it.y=m; it.vy=Math.abs(it.vy); }
+      if(it.y>H-m){ it.y=H-m; it.vy=-Math.abs(it.vy); }
+    }
+    it.wiggle = Math.max(0, it.wiggle - dt*1.6);
+
+    const t = now/1000;
+    const appear = Math.min(1,(now-it.born)/500);
+    const ease = 1-Math.pow(1-appear,3);
+    const bob = 1 + Math.sin(t*1.6+it.phase)*0.025;
+    const wig = Math.sin(it.wiggle*22)*it.wiggle*0.12;
+    const [light, dark] = it.color;
+
+    if(it.dying){
+      const k = (now-it.dieAt)/1000;
+      const s = Math.min(1,k/0.45), c1 = 1.70158, c3 = c1+1;
+      const back = 1 + c3*Math.pow(s-1,3) + c1*Math.pow(s-1,2);
+      const alpha = k<2.3 ? 1 : Math.max(0, 1-(k-2.3)/0.4);
+      const n = [...it.emoji.matchAll(/\p{Extended_Pictographic}/gu)].length || 1;
+      const esize = it.digit ? it.r*Math.min(1.5, 4.5/n) : it.r*1.5;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.translate(it.x, it.y - Math.min(k,1)*10);
+      ctx.rotate(Math.sin(k*4)*0.06);
+      ctx.scale(back, back);
+      ctx.textAlign="center"; ctx.textBaseline="middle";
+      ctx.font = `${esize}px "Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif`;
+      ctx.fillText(it.emoji, 0, -(it.word ? it.r*.2 : 0));
+      if(it.word){
+        const fs = it.r*.5, y = it.r*.95;
+        ctx.font = `800 ${fs}px "Nunito","Avenir Next","Trebuchet MS",sans-serif`;
+        // the pressed letter is highlighted wherever it sits in the word
+        const h = it.hl || 0;
+        const pa = it.word.slice(0,h), pb = it.word.slice(h,h+1), pc = it.word.slice(h+1);
+        const wa = ctx.measureText(pa).width, wb = ctx.measureText(pb).width, wc = ctx.measureText(pc).width;
+        const x0 = -(wa+wb+wc)/2;
+        ctx.textAlign="left";
+        ctx.fillStyle = "#6b5b7b"; ctx.fillText(pa, x0, y);
+        ctx.fillStyle = dark;      ctx.fillText(pb, x0+wa, y);
+        ctx.fillStyle = "#6b5b7b"; ctx.fillText(pc, x0+wa+wb, y);
+      }
+      ctx.restore();
+      continue;
+    }
+
+    ctx.save();
+    ctx.translate(it.x, it.y + Math.sin(t+it.phase)*5);
+    ctx.rotate(wig);
+    ctx.scale(ease*bob, ease*bob);
+    const g = ctx.createRadialGradient(-it.r*.3,-it.r*.35,it.r*.1, 0,0,it.r);
+    g.addColorStop(0,"#ffffff"); g.addColorStop(.35,light); g.addColorStop(1,dark);
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0,0,it.r,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,.55)";
+    ctx.beginPath(); ctx.ellipse(-it.r*.35,-it.r*.45,it.r*.22,it.r*.12,-.6,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle = "#6b5b7b"; ctx.textAlign="center"; ctx.textBaseline="middle";
+    ctx.font = `800 ${it.r*1.15}px "Nunito","Avenir Next","Trebuchet MS",sans-serif`;
+    ctx.fillText(it.ch, 0, it.r*.06);
+    ctx.restore();
+  }
+
+  particles = particles.filter(p=>p.life>0);
+  for(const p of particles){
+    p.life -= dt*0.9;
+    ctx.globalAlpha = Math.max(0,p.life);
+    if(p.ring){
+      p.r += dt*140;
+      ctx.strokeStyle = p.color; ctx.lineWidth = 4*p.life;
+      ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,Math.PI*2); ctx.stroke();
+    } else {
+      p.x += p.vx*dt; p.y += p.vy*dt; p.vx*=.97; p.vy = p.vy*.97 + 25*dt;
+      ctx.fillStyle = p.color;
+      if(p.shape==="dot"){ ctx.beginPath(); ctx.arc(p.x,p.y,p.size*.5,0,Math.PI*2); ctx.fill(); }
+      else if(p.shape==="star") drawStar(p.x,p.y,p.size);
+      else drawHeart(p.x,p.y,p.size);
+    }
+    ctx.globalAlpha = 1;
+  }
+  requestAnimationFrame(frame);
+}
+
+// ---------- Start / fullscreen ----------
+document.querySelectorAll("#start button").forEach(b=>b.addEventListener("click", ()=>{
+  SETTINGS.lang = b.dataset.lang;
+  buildNames(SETTINGS.lang);
+  started = true; document.getElementById("start").style.display="none";
+  audio() && audio().resume();
+  if(window.speechSynthesis){
+    speechSynthesis.getVoices();
+    // iPad/iPhone Safari only allows speech after a tap: "unlock" it here with a silent utterance
+    try{ const u = new SpeechSynthesisUtterance(" "); u.volume = 0; speechSynthesis.speak(u); }catch(e){}
+  }
+  fill();
+}));
+
+// Tapping a bubble pops it (for iPad without a keyboard, or little fingers)
+cv.addEventListener("pointerdown", e=>{
+  if(!started || paused) return;
+  const r = cv.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+  const hit = items.find(i => !i.dying && Math.hypot(i.x-x, i.y-y) < i.r*1.15);
+  if(hit) press(hit.ch);
+});
+
+// Grown-up controls must be pressed and held (~1 second), so a toddler's taps don't trigger them
+function holdTo(el, fn, ms){
+  let t;
+  el.addEventListener("pointerdown", ()=>{ clearTimeout(t); el.style.opacity = 1; t = setTimeout(()=>{ el.style.opacity = ""; fn(); }, ms || 900); });
+  ["pointerup","pointerleave","pointercancel"].forEach(ev => el.addEventListener(ev, ()=>{ clearTimeout(t); el.style.opacity = ""; }));
+}
+holdTo(document.getElementById("home"), goHome);
+holdTo(document.getElementById("pausebtn"), togglePause);
+holdTo(document.getElementById("resumehold"), togglePause);
+holdTo(document.getElementById("endhold"), goHome);
+holdTo(document.getElementById("fsb"), ()=>{
+  const d = document, el = d.documentElement;
+  if(!(d.fullscreenElement || d.webkitFullscreenElement)) (el.requestFullscreen || el.webkitRequestFullscreen || (()=>{})).call(el);
+  else (d.exitFullscreen || d.webkitExitFullscreen || (()=>{})).call(d);
+});
+if(!(document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen)) document.getElementById("fsb").style.display = "none";
+document.getElementById("paused").addEventListener("click", e=>e.stopPropagation());   // clicking the overlay does nothing
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
